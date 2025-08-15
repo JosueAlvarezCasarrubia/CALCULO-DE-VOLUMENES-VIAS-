@@ -1,1 +1,329 @@
-CALCULO DE VOLUMENES
+from dataclasses import dataclass
+from typing import List, Literal, Optional, Dict
+import math
+import pandas as pd
+
+
+@dataclass
+class Seccion:
+    """
+    Representa una sección transversal.
+
+    Parámetros
+    ----------
+    abscisa : float
+        Valor de abscisa en metros (puedes transformar Kx+yyy a metros antes).
+    chaflan_izq : float
+        Cota del chaflán izquierdo (m).
+    cota_natural_N : float
+        Cota negra (terreno natural en el eje) (m).
+    chaflan_der : float
+        Cota del chaflán derecho (m).
+    """
+    abscisa: float
+    chaflan_izq: float
+    cota_natural_N: float
+    chaflan_der: float
+
+
+@dataclass
+class ParametrosViales:
+    subrasante: float              # Cota de subrasante (m)
+    ancho_banca_B: float           # Ancho de banca B (m)
+    # Taludes expresados como "V:H" -> aquí guardamos las relaciones H/V
+    H_por_V_corte: float = 1/2     # Corte 2V:1H -> H/V = 1/2
+    H_por_V_relleno: float = 3/2   # Relleno 2V:3H -> H/V = 3/2
+
+
+@dataclass
+class ResultadoSeccion:
+    abscisa: float
+    B_2: float
+    YI: float
+    XI: float
+    Ey: float
+    Ex: float
+    YD: float
+    XD: float
+    di: float
+    dd: float
+    area_corte: float
+    area_relleno: float
+    area_neta: float
+    tipo: Literal["pura_corte", "pura_relleno", "mixta", "nula"]
+
+
+@dataclass
+class ResultadoTramo:
+    i: int
+    abscisa_i: float
+    abscisa_j: float
+    L: float
+    V_corte: float
+    V_relleno: float
+    V_neto: float
+    caso_corte: str
+    caso_relleno: str
+
+
+def _distancia_talud(h: float, H_por_V_corte: float, H_por_V_relleno: float) -> float:
+    """
+    Distancia horizontal de talud en función de la altura h (con signo).
+    Si h>0 => corte; h<0 => relleno. Se usa |h| * (H/V) correspondiente.
+    """
+    if h > 0:
+        return abs(h) * H_por_V_corte
+    elif h < 0:
+        return abs(h) * H_por_V_relleno
+    else:
+        return 0.0
+
+
+def calcular_area_seccion(sec: Seccion, p: ParametrosViales) -> ResultadoSeccion:
+    """
+    Calcula los puntos clave y el área por la fórmula dada (shoelace simplificada)
+    y separa en corte / relleno por signos de los términos del numerador.
+
+    Notas de coherencia con tu ejemplo:
+    - Usamos YI, Ey, YD **con signo** (NO valor absoluto), tal cual tu ejemplo.
+    - di, dd usan la magnitud de h y el talud correspondiente:
+        * Corte 2V:1H -> H/V=1/2
+        * Relleno 2V:3H -> H/V=3/2
+    - XI = B/2 + di ; XD = B/2 + dd
+    - Fórmula del numerador (según tu prompt):
+        N = (B/2)*YI + (XI)*Ey + (Ey)*XD + (YD)*(B/2)
+      Área neta firmada = N / 2
+      Área de corte = (suma de términos positivos)/2
+      Área de relleno = |suma de términos negativos|/2
+    """
+    B = p.ancho_banca_B
+    B_2 = B / 2.0
+
+    # Alturas con signo
+    YI = sec.chaflan_izq - p.subrasante
+    Ey = sec.cota_natural_N - p.subrasante
+    YD = sec.chaflan_der - p.subrasante
+
+    # Distancias horizontales de talud
+    di = _distancia_talud(YI, p.H_por_V_corte, p.H_por_V_relleno)
+    dd = _distancia_talud(YD, p.H_por_V_corte, p.H_por_V_relleno)
+
+    # Coordenadas requeridas
+    XI = B_2 + di
+    XD = B_2 + dd
+    Ex = 0.0  # como en tu definición (no interviene en la fórmula final)
+
+    # Términos del numerador (exacto a tu formulación)
+    t1 = B_2 * YI
+    t2 = XI * Ey
+    t3 = Ey * XD
+    t4 = YD * B_2
+
+    terminos = [t1, t2, t3, t4]
+    suma_pos = sum(t for t in terminos if t > 0)
+    suma_neg = sum(t for t in terminos if t < 0)
+
+    area_corte = suma_pos / 2.0
+    area_relleno = abs(suma_neg) / 2.0
+    area_neta = area_corte - area_relleno
+
+    # Clasificación
+    if area_corte > 0 and area_relleno == 0:
+        tipo = "pura_corte"
+    elif area_relleno > 0 and area_corte == 0:
+        tipo = "pura_relleno"
+    elif area_corte > 0 and area_relleno > 0:
+        tipo = "mixta"
+    else:
+        tipo = "nula"
+
+    return ResultadoSeccion(
+        abscisa=sec.abscisa,
+        B_2=B_2,
+        YI=YI, XI=XI,
+        Ey=Ey, Ex=Ex,
+        YD=YD, XD=XD,
+        di=di, dd=dd,
+        area_corte=area_corte,
+        area_relleno=area_relleno,
+        area_neta=area_neta,
+        tipo=tipo
+    )
+
+
+def _vol_prismoide(L: float, A1: float, A2: float) -> float:
+    return L * (A1 + A2) / 2.0
+
+
+def _vol_troncopiramoide(L: float, A1: float, A2: float) -> float:
+    # Fórmula: V = (L/3) * (A1 + A2 + sqrt(A1*A2))
+    if A1 <= 0 and A2 <= 0:
+        return 0.0
+    return (L / 3.0) * (A1 + A2 + math.sqrt(max(A1, 0) * max(A2, 0)))
+
+
+def _vol_piramide(L: float, A: float) -> float:
+    # V = (L/3) * A  (cuando el otro extremo es 0)
+    return (L / 3.0) * max(A, 0)
+
+
+def calcular_volumenes(secciones: List[ResultadoSeccion]) -> List[ResultadoTramo]:
+    """
+    Calcula volúmenes entre pares consecutivos de secciones siguiendo las reglas:
+    - Prismoide: dos áreas de igual naturaleza (>0 en ambos extremos).
+    - Troncopiramoide: transición pura↔mixta para la parte de igual naturaleza.
+    - Pirámide: en la misma transición, la parte opuesta (que se anula a 0).
+    - Mixta↔Mixta: se aplica prismoide por cada naturaleza (corte y relleno) por separado.
+
+    Nota: En pura_corte ↔ pura_relleno, se aplican dos pirámides independientes
+    (cada naturaleza termina/empieza en 0), total = L*(A_c1 + A_r2)/3.
+    """
+    resultados: List[ResultadoTramo] = []
+    for i in range(len(secciones) - 1):
+        si = secciones[i]
+        sj = secciones[i + 1]
+        L = sj.abscisa - si.abscisa
+
+        # Áreas por naturaleza
+        Ai_c, Ai_r = si.area_corte, si.area_relleno
+        Aj_c, Aj_r = sj.area_corte, sj.area_relleno
+
+        # Inicializar
+        Vc = 0.0
+        Vr = 0.0
+        caso_corte = "-"
+        caso_relleno = "-"
+
+        # ---- CORTE ----
+        if si.tipo == "pura_corte" and sj.tipo == "mixta":
+            Vc = _vol_troncopiramoide(L, Ai_c, Aj_c)  # parte de corte (homóloga)
+            caso_corte = "troncopiramoide (pura→mixta, corte)"
+        elif si.tipo == "mixta" and sj.tipo == "pura_corte":
+            Vc = _vol_troncopiramoide(L, Ai_c, Aj_c)
+            caso_corte = "troncopiramoide (mixta→pura, corte)"
+        elif Ai_c > 0 and Aj_c > 0:
+            Vc = _vol_prismoide(L, Ai_c, Aj_c)
+            caso_corte = "prismoide (corte↔corte)"
+        elif (Ai_c > 0 and Aj_c == 0) or (Ai_c == 0 and Aj_c > 0):
+            # Se desvanece/arranca desde cero -> pirámide
+            Vc = _vol_piramide(L, Ai_c if Ai_c > 0 else Aj_c)
+            caso_corte = "pirámide (corte↔0)"
+
+        # ---- RELLENO ----
+        if si.tipo == "pura_relleno" and sj.tipo == "mixta":
+            Vr = _vol_troncopiramoide(L, Ai_r, Aj_r)  # parte de relleno (homóloga)
+            caso_relleno = "troncopiramoide (pura→mixta, relleno)"
+        elif si.tipo == "mixta" and sj.tipo == "pura_relleno":
+            Vr = _vol_troncopiramoide(L, Ai_r, Aj_r)
+            caso_relleno = "troncopiramoide (mixta→pura, relleno)"
+        elif Ai_r > 0 and Aj_r > 0:
+            Vr = _vol_prismoide(L, Ai_r, Aj_r)
+            caso_relleno = "prismoide (relleno↔relleno)"
+        elif (Ai_r > 0 and Aj_r == 0) or (Ai_r == 0 and Aj_r > 0):
+            Vr = _vol_piramide(L, Ai_r if Ai_r > 0 else Aj_r)
+            caso_relleno = "pirámide (relleno↔0)"
+
+        resultados.append(
+            ResultadoTramo(
+                i=i + 1,
+                abscisa_i=si.abscisa,
+                abscisa_j=sj.abscisa,
+                L=L,
+                V_corte=Vc,
+                V_relleno=Vr,
+                V_neto=Vc - Vr,
+                caso_corte=caso_corte,
+                caso_relleno=caso_relleno
+            )
+        )
+
+    return resultados
+
+
+def tabla_secciones(secciones_raw: List[Seccion], p: ParametrosViales) -> pd.DataFrame:
+    filas: List[Dict] = []
+    for sec in secciones_raw:
+        r = calcular_area_seccion(sec, p)
+        filas.append({
+            "Abscisa": r.abscisa,
+            "B/2 [m]": r.B_2,
+            "YI [m]": r.YI,
+            "XI [m]": r.XI,
+            "Ey [m]": r.Ey,
+            "YD [m]": r.YD,
+            "XD [m]": r.XD,
+            "di [m]": r.di,
+            "dd [m]": r.dd,
+            "Área Corte [m²]": r.area_corte,
+            "Área Relleno [m²]": r.area_relleno,
+            "Área Neta [m²]": r.area_neta,
+            "Tipo": r.tipo
+        })
+    df = pd.DataFrame(filas).sort_values("Abscisa").reset_index(drop=True)
+    return df
+
+
+def tabla_volumenes(secciones_raw: List[Seccion], p: ParametrosViales) -> pd.DataFrame:
+    # Primero computamos por-sección
+    resultados_sec = [calcular_area_seccion(s, p) for s in secciones_raw]
+    # Ordenar por abscisa por seguridad
+    resultados_sec = sorted(resultados_sec, key=lambda r: r.abscisa)
+    # Luego computamos por-tramo
+    tramos = calcular_volumenes(resultados_sec)
+    filas: List[Dict] = []
+    for t in tramos:
+        filas.append({
+            "Tramo": f"{t.i} ({t.abscisa_i:.3f} → {t.abscisa_j:.3f})",
+            "L [m]": t.L,
+            "V Corte [m³]": t.V_corte,
+            "V Relleno [m³]": t.V_relleno,
+            "V Neto [m³]": t.V_neto,
+            "Caso Corte": t.caso_corte,
+            "Caso Relleno": t.caso_relleno
+        })
+    df = pd.DataFrame(filas)
+    return df
+
+
+def exportar_excel(df_sec: pd.DataFrame, df_vol: pd.DataFrame, ruta: str) -> None:
+    with pd.ExcelWriter(ruta, engine="xlsxwriter") as writer:
+        df_sec.to_excel(writer, index=False, sheet_name="Secciones")
+        df_vol.to_excel(writer, index=False, sheet_name="Volúmenes")
+
+
+# ============================
+# Ejemplo mínimo de uso
+# ============================
+if __name__ == "__main__":
+    # --- Parámetros globales (ajusta con tus datos) ---
+    p = ParametrosViales(
+        subrasante=63.00,      # Cota de subrasante (##)
+        ancho_banca_B=12.00    # Ancho de la banca B (##)
+        # Taludes por defecto: corte 2V:1H, relleno 2V:3H
+    )
+
+    # --- Secciones (reemplaza por tus valores reales) ---
+    # Si tienes K2+369.53, convierte a metros (p.ej. K2=2000 m -> 2000+369.53 = 2369.53)
+    secciones = [
+        Seccion(abscisa=2360.00, chaflan_izq=64.00, cota_natural_N=63.20, chaflan_der=62.40),
+        Seccion(abscisa=2369.53, chaflan_izq=64.00, cota_natural_N=63.00, chaflan_der=62.00),  # tu ejemplo
+        Seccion(abscisa=2380.00, chaflan_izq=62.80, cota_natural_N=62.90, chaflan_der=63.10),
+        # Agrega tantas secciones como necesites...
+    ]
+
+    # Tablas
+    df_secciones = tabla_secciones(secciones, p)
+    df_volumenes = tabla_volumenes(secciones, p)
+
+    # Mostrar por consola
+    pd.set_option("display.width", 140)
+    pd.set_option("display.precision", 3)
+    print("\n=== ÁREAS POR SECCIÓN ===")
+    print(df_secciones)
+
+    print("\n=== VOLÚMENES ENTRE SECCIONES ===")
+    print(df_volumenes)
+
+    # Exporta si quieres:
+    # exportar_excel(df_secciones, df_volumenes, "resultados_terraplenes_volumenes.xlsx")
+
